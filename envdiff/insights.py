@@ -1,72 +1,67 @@
-"""High-level insight analysis combining profiler, annotator, and redactor."""
-
+"""High-level insight report combining profiler, linter, annotator and grouper output."""
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Dict, List
 
-from envdiff.profiler import profile
+from envdiff.profiler import ProfileResult
+from envdiff.linter import LintResult
 from envdiff.annotator import annotate
-from envdiff.redactor import redact
+from envdiff.grouper import group, GroupResult
 
 
 @dataclass
 class InsightReport:
-    total_keys: int
-    blank_count: int
-    duplicate_value_count: int
-    secret_count: int
-    redacted_keys: List[str]
+    total_keys: int = 0
+    blank_keys: int = 0
+    secret_keys: int = 0
+    groups: GroupResult = field(default_factory=GroupResult)
+    lint_issue_count: int = 0
     warnings: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
-            f"Total keys   : {self.total_keys}",
-            f"Blank values : {self.blank_count}",
-            f"Duplicates   : {self.duplicate_value_count}",
-            f"Secrets      : {self.secret_count}",
+            f"Total keys  : {self.total_keys}",
+            f"Blank values: {self.blank_keys}",
+            f"Secret keys : {self.secret_keys}",
+            f"Groups      : {self.groups.summary()}",
+            f"Lint issues : {self.lint_issue_count}",
         ]
         if self.warnings:
             lines.append("Warnings:")
-            for w in self.warnings:
-                lines.append(f"  - {w}")
+            lines.extend(f"  - {w}" for w in self.warnings)
         return "\n".join(lines)
 
 
-def _build_warnings(
-    blank_count: int,
-    duplicate_value_count: int,
-    secret_count: int,
-) -> List[str]:
+def _build_warnings(report: InsightReport) -> List[str]:
     warnings: List[str] = []
-    if blank_count > 0:
-        warnings.append(f"{blank_count} key(s) have blank values.")
-    if duplicate_value_count > 0:
-        warnings.append(f"{duplicate_value_count} duplicate value(s) detected.")
-    if secret_count == 0:
-        warnings.append("No secret keys found — verify sensitive data is not stored as plain keys.")
+    if report.blank_keys > 0:
+        warnings.append(f"{report.blank_keys} key(s) have blank values.")
+    if report.lint_issue_count > 0:
+        warnings.append(f"{report.lint_issue_count} lint issue(s) detected.")
+    ratio = report.secret_keys / report.total_keys if report.total_keys else 0
+    if ratio > 0.5:
+        warnings.append("More than 50% of keys look like secrets — consider a secrets manager.")
     return warnings
 
 
-def analyse(env: Dict[str, str]) -> InsightReport:
-    """Run profiler, annotator, and redactor and return a combined InsightReport."""
-    prof = profile(env)
-    tags = annotate(env)
-    red = redact(env)
+def analyse(
+    env: Dict[str, str],
+    profile: ProfileResult | None = None,
+    lint: LintResult | None = None,
+) -> InsightReport:
+    annotations = annotate(env)
+    grp = group(env)
 
-    secret_count = sum(1 for t in tags.values() if "secret" in t)
+    secret_count = len([k for k, tags in annotations.items() if "secret" in tags])
+    blank_count = len([v for v in env.values() if v == ""])
+    lint_count = len(lint.issues) if lint else 0
 
-    warnings = _build_warnings(
-        blank_count=prof.blank_values,
-        duplicate_value_count=len(prof.duplicate_values),
-        secret_count=secret_count,
+    report = InsightReport(
+        total_keys=len(env),
+        blank_keys=blank_count,
+        secret_keys=secret_count,
+        groups=grp,
+        lint_issue_count=lint_count,
     )
-
-    return InsightReport(
-        total_keys=prof.total_keys,
-        blank_count=prof.blank_values,
-        duplicate_value_count=len(prof.duplicate_values),
-        secret_count=secret_count,
-        redacted_keys=red.redacted_keys,
-        warnings=warnings,
-    )
+    report.warnings = _build_warnings(report)
+    return report
