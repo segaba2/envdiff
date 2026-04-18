@@ -1,61 +1,63 @@
-"""Pipeline builder: chain diff steps with a fluent API."""
+"""Fluent pipeline for parsing, filtering, sorting, diffing, and optionally merging env files."""
+
 from __future__ import annotations
-from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
-from envdiff.differ import diff_files
-from envdiff.reporter import render, exit_code
+from envdiff.parser import parse_env_file
+from envdiff.filter import filter_keys, filter_prefix
+from envdiff.sorter import sort_keys
+from envdiff.comparator import DiffResult, compare
+from envdiff.merger import MergeResult, merge as _merge
 
 
-@dataclass
 class Pipeline:
-    """Fluent builder for a full envdiff run."""
+    def __init__(self) -> None:
+        self._files: Dict[str, str] = {}  # label -> path
+        self._exclude: List[str] = []
+        self._prefix: Optional[str] = None
+        self._sort: str = "alpha"
+        self._envs: Dict[str, Dict[str, str]] = {}
 
-    _path_a: str = ""
-    _path_b: str = ""
-    _exclude: List[str] = field(default_factory=list)
-    _prefix: Optional[str] = None
-    _sort: str = "alpha"
-    _format: str = "text"
-    _color: bool = True
-
-    def files(self, path_a: str, path_b: str) -> Pipeline:
-        self._path_a = path_a
-        self._path_b = path_b
+    def files(self, **labeled_paths: str) -> "Pipeline":
+        self._files.update(labeled_paths)
         return self
 
-    def exclude(self, *patterns: str) -> Pipeline:
+    def exclude(self, *patterns: str) -> "Pipeline":
         self._exclude.extend(patterns)
         return self
 
-    def prefix(self, prefix: str) -> Pipeline:
+    def prefix(self, prefix: str) -> "Pipeline":
         self._prefix = prefix
         return self
 
-    def sort(self, strategy: str) -> Pipeline:
-        self._sort = strategy
+    def sort(self, order: str = "alpha") -> "Pipeline":
+        self._sort = order
         return self
 
-    def format(self, fmt: str) -> Pipeline:
-        self._format = fmt
-        return self
+    def _load(self) -> None:
+        self._envs = {}
+        for label, path in self._files.items():
+            env = parse_env_file(path)
+            if self._prefix:
+                env = filter_prefix(env, self._prefix)
+            if self._exclude:
+                env = filter_keys(env, self._exclude)
+            self._envs[label] = env
 
-    def no_color(self) -> Pipeline:
-        self._color = False
-        return self
+    def diff(self) -> DiffResult:
+        self._load()
+        labels = list(self._envs)
+        if len(labels) < 2:
+            raise ValueError("Need at least two files to diff.")
+        a_label, b_label = labels[0], labels[1]
+        result = compare(self._envs[a_label], self._envs[b_label])
+        keys = sort_keys(result, order=self._sort)
+        return result
 
-    def run(self) -> int:
-        """Execute the pipeline and return an exit code (0 = no diff)."""
-        if not self._path_a or not self._path_b:
-            raise ValueError("Both file paths must be set before calling run().")
+    def merge(self, strategy: str = "first") -> MergeResult:
+        self._load()
+        return _merge(self._envs, strategy=strategy)
 
-        result = diff_files(
-            self._path_a,
-            self._path_b,
-            exclude_patterns=self._exclude or None,
-            prefix=self._prefix,
-            sort=self._sort,
-        )
-        output = render(result, fmt=self._format, color=self._color)
-        print(output, end="")
-        return exit_code(result)
+    def envs(self) -> Dict[str, Dict[str, str]]:
+        self._load()
+        return dict(self._envs)
