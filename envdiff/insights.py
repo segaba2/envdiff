@@ -1,49 +1,50 @@
-"""High-level insights combining profiler and annotator output."""
-from __future__ import annotations
+"""High-level insight report combining profiler, linter, annotator, and scorer."""
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import List, Dict, Any
 
-from envdiff.profiler import profile, ProfileResult
-from envdiff.annotator import annotate
+from envdiff.profiler import profile as run_profile
+from envdiff.linter import lint_file
+from envdiff.annotator import annotate, secret_keys, blank_keys
+from envdiff.scorer import score as run_score, ScoreReport
 
 
 @dataclass
 class InsightReport:
-    profile: ProfileResult
-    annotations: Dict[str, List[str]] = field(default_factory=dict)
+    path: str
+    score: ScoreReport
     warnings: List[str] = field(default_factory=list)
+    tags: Dict[str, List[str]] = field(default_factory=dict)
 
     def summary(self) -> str:
-        parts = [self.profile.summary()]
+        lines = [f"[{self.path}]", self.score.summary()]
         if self.warnings:
-            parts.append("Warnings:")
-            parts.extend(f"  - {w}" for w in self.warnings)
-        return "\n".join(parts)
+            lines.append("Warnings:")
+            for w in self.warnings:
+                lines.append(f"  ! {w}")
+        return "\n".join(lines)
 
 
-def _build_warnings(
-    prof: ProfileResult,
-    annotations: Dict[str, List[str]],
-) -> List[str]:
+def _build_warnings(env: dict, tags: Dict[str, List[str]]) -> List[str]:
     warnings: List[str] = []
-    if prof.blank_values:
-        warnings.append(f"{len(prof.blank_values)} key(s) have blank values: {', '.join(prof.blank_values)}")
-    if prof.duplicate_values:
-        for val, keys in prof.duplicate_values.items():
-            warnings.append(f"Duplicate value shared by: {', '.join(keys)}")
-    exposed = [k for k, tags in annotations.items() if "secret" in tags and "blank" not in tags]
-    # secrets with numeric-only values are suspicious
-    numeric_secrets = [
-        k for k in exposed if "numeric" in annotations.get(k, [])
-    ]
-    if numeric_secrets:
-        warnings.append(f"Numeric-only secret value(s): {', '.join(numeric_secrets)}")
+    secrets = secret_keys(tags)
+    blanks = blank_keys(tags)
+    exposed = [k for k in secrets if env.get(k, "") not in ("", "REDACTED")]
+    if exposed:
+        warnings.append(f"{len(exposed)} secret key(s) have plaintext values")
+    if blanks:
+        warnings.append(f"{len(blanks)} key(s) have blank values: {', '.join(sorted(blanks))}")
+    url_keys = [k for k, t in tags.items() if "url" in t]
+    if url_keys:
+        warnings.append(f"{len(url_keys)} URL value(s) detected — verify accessibility")
     return warnings
 
 
-def analyse(env: Dict[str, str]) -> InsightReport:
-    """Run profiler + annotator and produce an InsightReport."""
-    prof = profile(env)
-    ann = annotate(env)
-    warnings = _build_warnings(prof, ann)
-    return InsightReport(profile=prof, annotations=ann, warnings=warnings)
+def analyse(path: str) -> InsightReport:
+    from envdiff.parser import parse_env_file
+    env = parse_env_file(path)
+    profile = run_profile(env)
+    lint = lint_file(path)
+    tags = annotate(env)
+    sc = run_score(profile, lint, env)
+    warnings = _build_warnings(env, tags)
+    return InsightReport(path=path, score=sc, warnings=warnings, tags=tags)
