@@ -65,3 +65,15 @@ def test_multiple_equals_in_value(tmp_path):
     """Value containing '=' should be preserved."""
     f = write_env(tmp_path, "ENCODED=abc=def=ghi\n")
     assert parse_env_file(f)["ENCODED"] == "abc=def=ghi"
+
+
+def test_inline_comment_stripped(tmp_path):
+    """Unquoted values with inline comments should have the comment stripped."""
+    f = write_env(tmp_path, "HOST=localhost # production host\n")
+    assert parse_env_file(f)["HOST"] == "localhost"
+
+
+def test_inline_comment_preserved_in_quoted_value(tmp_path):
+    """Inline comments inside quoted values should be kept as part of the value."""
+    f = write_env(tmp_path, 'DESCRIPTION="hello # world"\n')
+    assert parse_env_file(f)["DESCRIPTION"] == "hello # world"
