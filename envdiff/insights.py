@@ -1,50 +1,72 @@
-"""High-level insight report combining profiler, linter, annotator, and scorer."""
-from dataclasses import dataclass, field
-from typing import List, Dict, Any
+"""High-level insight analysis combining profiler, annotator, and redactor."""
 
-from envdiff.profiler import profile as run_profile
-from envdiff.linter import lint_file
-from envdiff.annotator import annotate, secret_keys, blank_keys
-from envdiff.scorer import score as run_score, ScoreReport
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, List
+
+from envdiff.profiler import profile
+from envdiff.annotator import annotate
+from envdiff.redactor import redact
 
 
 @dataclass
 class InsightReport:
-    path: str
-    score: ScoreReport
+    total_keys: int
+    blank_count: int
+    duplicate_value_count: int
+    secret_count: int
+    redacted_keys: List[str]
     warnings: List[str] = field(default_factory=list)
-    tags: Dict[str, List[str]] = field(default_factory=dict)
 
     def summary(self) -> str:
-        lines = [f"[{self.path}]", self.score.summary()]
+        lines = [
+            f"Total keys   : {self.total_keys}",
+            f"Blank values : {self.blank_count}",
+            f"Duplicates   : {self.duplicate_value_count}",
+            f"Secrets      : {self.secret_count}",
+        ]
         if self.warnings:
             lines.append("Warnings:")
             for w in self.warnings:
-                lines.append(f"  ! {w}")
+                lines.append(f"  - {w}")
         return "\n".join(lines)
 
 
-def _build_warnings(env: dict, tags: Dict[str, List[str]]) -> List[str]:
+def _build_warnings(
+    blank_count: int,
+    duplicate_value_count: int,
+    secret_count: int,
+) -> List[str]:
     warnings: List[str] = []
-    secrets = secret_keys(tags)
-    blanks = blank_keys(tags)
-    exposed = [k for k in secrets if env.get(k, "") not in ("", "REDACTED")]
-    if exposed:
-        warnings.append(f"{len(exposed)} secret key(s) have plaintext values")
-    if blanks:
-        warnings.append(f"{len(blanks)} key(s) have blank values: {', '.join(sorted(blanks))}")
-    url_keys = [k for k, t in tags.items() if "url" in t]
-    if url_keys:
-        warnings.append(f"{len(url_keys)} URL value(s) detected — verify accessibility")
+    if blank_count > 0:
+        warnings.append(f"{blank_count} key(s) have blank values.")
+    if duplicate_value_count > 0:
+        warnings.append(f"{duplicate_value_count} duplicate value(s) detected.")
+    if secret_count == 0:
+        warnings.append("No secret keys found — verify sensitive data is not stored as plain keys.")
     return warnings
 
 
-def analyse(path: str) -> InsightReport:
-    from envdiff.parser import parse_env_file
-    env = parse_env_file(path)
-    profile = run_profile(env)
-    lint = lint_file(path)
+def analyse(env: Dict[str, str]) -> InsightReport:
+    """Run profiler, annotator, and redactor and return a combined InsightReport."""
+    prof = profile(env)
     tags = annotate(env)
-    sc = run_score(profile, lint, env)
-    warnings = _build_warnings(env, tags)
-    return InsightReport(path=path, score=sc, warnings=warnings, tags=tags)
+    red = redact(env)
+
+    secret_count = sum(1 for t in tags.values() if "secret" in t)
+
+    warnings = _build_warnings(
+        blank_count=prof.blank_values,
+        duplicate_value_count=len(prof.duplicate_values),
+        secret_count=secret_count,
+    )
+
+    return InsightReport(
+        total_keys=prof.total_keys,
+        blank_count=prof.blank_values,
+        duplicate_value_count=len(prof.duplicate_values),
+        secret_count=secret_count,
+        redacted_keys=red.redacted_keys,
+        warnings=warnings,
+    )
